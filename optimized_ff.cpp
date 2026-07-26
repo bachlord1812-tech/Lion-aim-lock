@@ -40,6 +40,8 @@ struct Entity {
     float velX, velY, accX, accY;
     int health, maxHealth, armor, team;
     bool visible, alive, moving, jumping, crouching;
+    uintptr_t address;           // Địa chỉ entity trong bộ nhớ
+    float pos[3];                // Vị trí 3D
     std::chrono::steady_clock::time_point lastSeen, firstSeen;
 };
 
@@ -192,7 +194,7 @@ static void scanEntities() {
     if (libBase == 0) libBase = getModuleBase(TARGET_LIB);
     if (!libBase) return;
 
-    // Đọc danh sách entity (cần tìm offset thực tế – ví dụ)
+    // Đọc danh sách entity (cần tìm offset thực tế)
     uintptr_t entityList = libBase + 0x123456; // Thay bằng offset thực
     uintptr_t listPtr; if (!readMem(entityList, &listPtr, sizeof(listPtr))) return;
     int count; if (!readMem(entityList + 8, &count, sizeof(count))) return;
@@ -201,16 +203,17 @@ static void scanEntities() {
     std::vector<Entity> newEnts;
     for (int i = 0; i < count; ++i) {
         uintptr_t ptr; if (!readMem(listPtr + i*8, &ptr, sizeof(ptr)) || !ptr) continue;
-        Entity e{}; e.address = ptr;
+        Entity e{};
+        e.address = ptr;
         readMem(ptr + 0x100, &e.health, 4);
         readMem(ptr + 0x104, &e.maxHealth, 4);
         readMem(ptr + 0x108, &e.armor, 4);
         readMem(ptr + 0x10C, &e.team, 4);
-        readMem(ptr + 0x110, &e.pos[0], 12);
-        readMem(ptr + 0x120, &e.vel[0], 12);
+        readMem(ptr + 0x110, e.pos, 12);
+        readMem(ptr + 0x120, &e.velX, 12);
         if (e.health > 0 && e.team >= 0) {
             e.alive = true;
-            e.dist = sqrtf(e.pos[0]*e.pos[0] + e.pos[1]*e.pos[1] + e.pos[2]*e.pos[2]);
+            e.distance = sqrtf(e.pos[0]*e.pos[0] + e.pos[1]*e.pos[1] + e.pos[2]*e.pos[2]);
             newEnts.push_back(e);
         }
     }
@@ -240,8 +243,8 @@ static void updateHeadLock(float dt) {
             if (d > W*0.8f) continue;
             float score = 1000.0f - d*0.5f;
             if (e.health < 30) score += 300;
-            if (e.isCrouching) score += 200;
-            if (e.isMoving) score -= 150;
+            if (e.crouching) score += 200;
+            if (e.moving) score -= 150;
             if (e.team != 0) score += 100;
             if (score > bestScore) { bestScore = score; bestEnt = e; found = true; }
         }
@@ -284,11 +287,6 @@ static void updateHeadLock(float dt) {
         tracker.curX += jitter(rng) * density * 0.3f;
         tracker.curY += jitter(rng) * density * 0.3f;
     }
-
-    // Cập nhật vị trí con trỏ thực tế (dùng cho input)
-    // Ở đây giả sử crossX, crossY là biến toàn cục dùng để xuất ra
-    // Thực tế cần gắn với hệ thống input của game
-    // crossX = tracker.curX; crossY = tracker.curY;
 }
 
 // ==================== THREAD QUÉT ====================
