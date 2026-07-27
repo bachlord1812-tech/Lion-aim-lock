@@ -1,419 +1,392 @@
-// optimized_ff.cpp
-// Tối ưu cho Free Fire – Hỗ trợ HeadLock + DeepScan + Hook
-// Biên dịch: ndk-build hoặc CMake với Android NDK r23+
-#include <jni.h>
-#include <android/native_window.h>
-#include <android/native_window_jni.h>
-#include <android/input.h>
-#include <android/log.h>
-#include <EGL/egl.h>
-#include <GLES3/gl3.h>
-#include <unistd.h>
-#include <cstring>
+                // ================================================================
+// HeadHyperTrick.cpp – Module bám đầu cao cấp, tối ưu cho Free Fire
+// Tính năng: Tìm mục tiêu theo bán kính crosshair (tâm màn hình)
+//            Siêu bám đầu, tăng sensitivity khi kéo, giảm giật khi dính
+// Sử dụng: Copy file này vào dự án, #include và dùng class HeadHyperTrick
+// ================================================================
+
 #include <cmath>
 #include <vector>
-#include <chrono>
-#include <thread>
-#include <algorithm>
-#include <atomic>
 #include <random>
-#include <sys/mman.h>
-#include <sys/stat.h>
-#include <fcntl.h>
-#include <dirent.h>
-#include <dlfcn.h>
-#include <mutex>
-#include <shared_mutex>
+#include <chrono>
+#include <algorithm>
 
-#define LOG_TAG "FF_Opt"
-#define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__)
-#define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
-#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
+// -------------------- CẤU TRÚC DỮ LIỆU --------------------
 
-// ==================== CẤU TRÚC DỮ LIỆU ====================
+// Thông tin một đối tượng (người chơi)
 struct Entity {
-    float x, y, width, height;
-    float headX, headY, headRadius;
-    float neckX, neckY;
-    float bodyX, bodyY;
-    float distance;
-    float velX, velY, accX, accY;
-    int health, maxHealth, armor, team;
-    bool visible, alive, moving, jumping, crouching;
-    uintptr_t address;           // Địa chỉ entity trong bộ nhớ
-    float pos[3];                // Vị trí 3D
-    std::chrono::steady_clock::time_point lastSeen, firstSeen;
+    float headX, headY;     // Vị trí đầu (pixel)
+    float neckX, neckY;     // Vị trí cổ
+    float bodyX, bodyY;     // Vị trí thân
+    float width, height;    // Kích thước bounding box
+    float distance;         // Khoảng cách tới camera
+    float velX, velY;       // Vận tốc (pixel/giây)
+    int health;             // Máu hiện tại
+    int team;               // Đội (0 = địch)
+    bool alive;
+    bool visible;
+    bool moving;
+    bool crouching;
 };
 
-struct Tracker {
-    float curX, curY, tarX, tarY, velX, velY;
-    float strength, accuracy;
-    int hits, shots;
-    float hitRate;
-    bool locked;
+// Cấu hình module
+struct HyperConfig {
+    // ---- Bám đầu ----
+    float lockStrength;     // Lực bám chính (0.5 – 2.0)
+    float lockSpeed;        // Tốc độ bám (0.5 – 3.0)
+    float snapDistance;     // Khoảng cách tự động snap (pixel)
+
+    // ---- Tìm mục tiêu theo bán kính ----
+    float searchRadius;     // Bán kính tìm kiếm (pixel) – thay thế cho FOV
+
+    // ---- Nhẹ tâm / Mượt ----
+    float smoothness;       // Độ mượt mục tiêu (0.7 – 0.99)
+    float inertia;          // Quán tính (0.0 – 0.5)
+
+    // ---- Fix rung (giảm giật) ----
+    float lowPassAlpha;     // Lọc thông thấp (0.0 – 1.0)
+
+    // ---- Fix lố ----
+    float maxStep;          // Bước di chuyển tối đa mỗi frame (pixel)
+
+    // ---- Fix lạc đạn ----
+    bool predictionEnabled;
+    float gravityComp;      // Bù trọng lực
+    float velocityComp;     // Bù vận tốc đối thủ
+    float bulletSpeed;      // Tốc độ đạn (pixel/giây)
+
+    // ---- Hỗ trợ kéo vào đầu (tăng sensitivity) ----
+    float attractionRadius; // Bán kính vùng hút (pixel)
+    float attractionForce;  // Lực hút vào đầu
+    float dragSensitivity;  // Hệ số tăng sensitivity khi kéo (1.0 – 3.0)
+
+    // ---- Nhiễu (anti-detection) ----
+    float noise;            // Nhiễu nhân tạo (pixel)
 };
 
-struct HookEntry {
-    uintptr_t target, hook;
-    std::vector<uint8_t> orig, patch;
-    bool active;
+// -------------------- LỚP CHÍNH --------------------
+
+class HeadHyperTrick {
+public:
+    HeadHyperTrick();
+    ~HeadHyperTrick() = default;
+
+    // Khởi tạo với kích thước màn hình
+    void init(float screenWidth, float screenHeight);
+
+    // Cập nhật danh sách entity (gọi mỗi khi có dữ liệu mới)
+    void setEntities(const Entity* entities, int count);
+
+    // Vòng lặp chính (gọi mỗi frame)
+    // dt: thời gian giữa các frame (giây)
+    // centerX, centerY: vị trí crosshair hiện tại (tâm màn hình)
+    // isDragging: true nếu người dùng đang kéo chuột/cảm ứng
+    void update(float dt, float centerX, float centerY, bool isDragging);
+
+    // Lấy vị trí crosshair mới
+    void getCrosshair(float& x, float& y) const;
+
+    // Kiểm tra đã khóa vào đầu chưa
+    bool isLocked() const;
+
+    // Lấy lực bám hiện tại
+    float getLockStrength() const;
+
+    // Thiết lập cấu hình
+    void setConfig(const HyperConfig& cfg);
+    const HyperConfig& getConfig() const { return config; }
+
+    // Reset trạng thái
+    void reset();
+
+private:
+    struct Tracker {
+        float curX, curY;       // Vị trí crosshair hiện tại
+        float tarX, tarY;       // Vị trí mục tiêu (đầu đối thủ)
+        float filteredX, filteredY; // Sau lọc rung
+        float strength;         // Lực bám (0 – 1)
+        bool locked;            // Đã khóa?
+        float inertiaX, inertiaY; // Quán tính
+        float lastCenterX, lastCenterY; // Vị trí tâm frame trước (để phát hiện kéo)
+    };
+
+    Tracker tracker;
+    HyperConfig config;
+    std::vector<Entity> entities;
+    float screenW, screenH;
+    float centerX, centerY;
+    bool lastDragging;
+    std::mt19937 rng;
+    std::normal_distribution<float> noiseDist;
+
+    // Hàm nội bộ
+    Entity findBestTarget(float cx, float cy);
+    float calculatePriority(const Entity& e, float cx, float cy);
+    void predictHead(const Entity& e, float& outX, float& outY, float dt);
+    void applyLowPass(float& value, float target, float alpha);
+    void applyInertia(float& value, float target, float inertiaFactor);
 };
 
-// ==================== BIẾN TOÀN CỤC ====================
-static int W, H;
-static float density;
-static std::atomic<bool> running{true};
-static std::atomic<bool> aimActive{false};
-static std::atomic<bool> fireActive{false};
+// -------------------- TRIỂN KHAI --------------------
 
-static std::shared_mutex entityMutex;
-static std::vector<Entity> entities;
-static Entity current, best;
-static Tracker tracker;
-static std::mt19937 rng;
-static std::normal_distribution<float> jitter(0.0f, 0.012f);
+HeadHyperTrick::HeadHyperTrick() {
+    screenW = 1920.0f;
+    screenH = 1080.0f;
+    centerX = screenW / 2.0f;
+    centerY = screenH / 2.0f;
+    lastDragging = false;
 
-static int memFd = -1;
-static std::mutex memMutex;
-static uintptr_t libBase = 0;
-static pid_t gamePid = 0;
-static const char* TARGET_PKG = "com.dts.freefireth";
-static const char* TARGET_LIB = "libil2cpp.so";
+    // Cấu hình mặc định (tối ưu cho Free Fire)
+    config.lockStrength = 1.3f;
+    config.lockSpeed = 2.0f;
+    config.snapDistance = 80.0f;
+    config.searchRadius = 300.0f;      // Bán kính tìm kiếm (pixel)
+    config.smoothness = 0.88f;
+    config.inertia = 0.12f;
+    config.lowPassAlpha = 0.25f;
+    config.maxStep = 600.0f;
+    config.predictionEnabled = true;
+    config.gravityComp = 1.0f;
+    config.velocityComp = 1.2f;
+    config.bulletSpeed = 850.0f;
+    config.attractionRadius = 180.0f;
+    config.attractionForce = 1.5f;
+    config.dragSensitivity = 2.0f;
+    config.noise = 0.5f;
 
-static std::vector<HookEntry> hooks;
-static std::shared_mutex hookMutex;
+    reset();
 
-// ==================== HÀM TIỆN ÍCH ====================
-static float dist(float x1, float y1, float x2, float y2) {
-    return sqrtf((x2-x1)*(x2-x1) + (y2-y1)*(y2-y1));
+    // Seed cho random
+    unsigned seed = std::chrono::steady_clock::now().time_since_epoch().count();
+    rng.seed(seed);
+    noiseDist = std::normal_distribution<float>(0.0f, 1.0f);
 }
 
-static pid_t findPid() {
-    DIR* dir = opendir("/proc");
-    if (!dir) return -1;
-    struct dirent* e;
-    while ((e = readdir(dir))) {
-        if (e->d_type != DT_DIR) continue;
-        int pid = atoi(e->d_name);
-        if (!pid) continue;
-        char path[256]; snprintf(path, sizeof(path), "/proc/%d/cmdline", pid);
-        FILE* f = fopen(path, "r");
-        if (!f) continue;
-        char cmd[128]; if (fgets(cmd, sizeof(cmd), f) && strstr(cmd, TARGET_PKG)) {
-            fclose(f); closedir(dir); return pid;
-        }
-        fclose(f);
-    }
-    closedir(dir);
-    return -1;
+void HeadHyperTrick::init(float screenWidth, float screenHeight) {
+    screenW = screenWidth;
+    screenH = screenHeight;
+    centerX = screenW / 2.0f;
+    centerY = screenH / 2.0f;
+    reset();
 }
 
-static int openMem() {
-    std::lock_guard<std::mutex> lock(memMutex);
-    if (memFd >= 0) return memFd;
-    memFd = open("/dev/mem", O_RDWR);
-    if (memFd < 0) memFd = open("/dev/mem", O_RDONLY);
-    return memFd;
-}
-
-static void closeMem() {
-    std::lock_guard<std::mutex> lock(memMutex);
-    if (memFd >= 0) { close(memFd); memFd = -1; }
-}
-
-static bool readMem(uintptr_t addr, void* buf, size_t sz) {
-    int fd = openMem();
-    if (fd < 0) return false;
-    lseek(fd, addr, SEEK_SET);
-    ssize_t n = read(fd, buf, sz);
-    return n == (ssize_t)sz;
-}
-
-static bool writeMem(uintptr_t addr, const void* buf, size_t sz) {
-    int fd = openMem();
-    if (fd < 0) return false;
-    lseek(fd, addr, SEEK_SET);
-    ssize_t n = write(fd, buf, sz);
-    return n == (ssize_t)sz;
-}
-
-static uintptr_t getModuleBase(const char* name) {
-    pid_t pid = findPid();
-    if (pid <= 0) return 0;
-    char path[256]; snprintf(path, sizeof(path), "/proc/%d/maps", pid);
-    FILE* f = fopen(path, "r");
-    if (!f) return 0;
-    char line[512];
-    uintptr_t base = 0;
-    while (fgets(line, sizeof(line), f)) {
-        uintptr_t start, end;
-        char perms[8], fname[256] = {0};
-        if (sscanf(line, "%lx-%lx %s %*x %*x:%*x %*d %255s", &start, &end, perms, fname) == 4) {
-            if (strstr(fname, name) && perms[0] == 'r') {
-                base = start;
-                break;
-            }
-        }
-    }
-    fclose(f);
-    return base;
-}
-
-// ==================== QUÉT PATTERN ====================
-static uintptr_t scanPattern(const std::vector<uint8_t>& pat, const std::vector<uint8_t>& mask, const char* module = nullptr) {
-    pid_t pid = findPid();
-    if (pid <= 0) return 0;
-    char path[256]; snprintf(path, sizeof(path), "/proc/%d/maps", pid);
-    FILE* f = fopen(path, "r");
-    if (!f) return 0;
-    char line[512];
-    uintptr_t found = 0;
-    while (fgets(line, sizeof(line), f) && !found) {
-        uintptr_t start, end; char perms[8], fname[256] = {0};
-        if (sscanf(line, "%lx-%lx %s %*x %*x:%*x %*d %255s", &start, &end, perms, fname) == 4) {
-            if (module && !strstr(fname, module)) continue;
-            if (!strchr(perms, 'r')) continue;
-            size_t sz = end - start;
-            std::vector<uint8_t> buf(sz);
-            if (!readMem(start, buf.data(), sz)) continue;
-            for (size_t i = 0; i <= sz - pat.size(); ++i) {
-                bool ok = true;
-                for (size_t j = 0; j < pat.size(); ++j) {
-                    if (mask[j] && buf[i+j] != pat[j]) { ok = false; break; }
-                }
-                if (ok) { found = start + i; break; }
-            }
-        }
-    }
-    fclose(f);
-    return found;
-}
-
-// ==================== ENTITY SCANNER ====================
-static void scanEntities() {
-    if (libBase == 0) libBase = getModuleBase(TARGET_LIB);
-    if (!libBase) return;
-
-    // Đọc danh sách entity (cần tìm offset thực tế)
-    uintptr_t entityList = libBase + 0x123456; // Thay bằng offset thực
-    uintptr_t listPtr; if (!readMem(entityList, &listPtr, sizeof(listPtr))) return;
-    int count; if (!readMem(entityList + 8, &count, sizeof(count))) return;
-    if (count > 100) count = 100;
-
-    std::vector<Entity> newEnts;
-    for (int i = 0; i < count; ++i) {
-        uintptr_t ptr; if (!readMem(listPtr + i*8, &ptr, sizeof(ptr)) || !ptr) continue;
-        Entity e{};
-        e.address = ptr;
-        readMem(ptr + 0x100, &e.health, 4);
-        readMem(ptr + 0x104, &e.maxHealth, 4);
-        readMem(ptr + 0x108, &e.armor, 4);
-        readMem(ptr + 0x10C, &e.team, 4);
-        readMem(ptr + 0x110, e.pos, 12);
-        readMem(ptr + 0x120, &e.velX, 12);
-        if (e.health > 0 && e.team >= 0) {
-            e.alive = true;
-            e.distance = sqrtf(e.pos[0]*e.pos[0] + e.pos[1]*e.pos[1] + e.pos[2]*e.pos[2]);
-            newEnts.push_back(e);
-        }
-    }
-    if (!newEnts.empty()) {
-        std::unique_lock lock(entityMutex);
-        entities = std::move(newEnts);
-    }
-}
-
-// ==================== HEAD LOCK ====================
-static void updateHeadLock(float dt) {
-    if (!aimActive) {
-        if (tracker.locked) { tracker.locked = false; tracker.strength = 0; }
-        return;
-    }
-
-    // Chọn target tốt nhất trong FOV
-    float bestScore = -1e9;
-    Entity bestEnt;
-    bool found = false;
-    {
-        std::shared_lock lock(entityMutex);
-        for (const auto& e : entities) {
-            if (!e.alive) continue;
-            float dx = e.headX - W/2, dy = e.headY - H/2;
-            float d = sqrtf(dx*dx + dy*dy);
-            if (d > W*0.8f) continue;
-            float score = 1000.0f - d*0.5f;
-            if (e.health < 30) score += 300;
-            if (e.crouching) score += 200;
-            if (e.moving) score -= 150;
-            if (e.team != 0) score += 100;
-            if (score > bestScore) { bestScore = score; bestEnt = e; found = true; }
-        }
-    }
-    if (!found) {
-        if (tracker.locked) { tracker.locked = false; tracker.strength = 0; }
-        return;
-    }
-
-    // Dự đoán vị trí đầu với lead và gravity
-    float bulletTime = bestEnt.distance / 850.0f;
-    float leadX = bestEnt.velX * bulletTime * 0.85f;
-    float leadY = bestEnt.velY * bulletTime * 0.85f;
-    float gravityOff = 0.5f * 980.0f * density * bulletTime * bulletTime;
-    float targetX = bestEnt.headX + leadX;
-    float targetY = bestEnt.headY + leadY + gravityOff;
-
-    // Làm mượt + nhiễu nhân tạo
-    if (!tracker.locked) {
-        tracker.tarX = targetX; tracker.tarY = targetY;
-        tracker.locked = true;
-        tracker.strength = 1.0f;
-    } else {
-        float smooth = 0.82f;
-        tracker.tarX += (targetX - tracker.tarX) * smooth;
-        tracker.tarY += (targetY - tracker.tarY) * smooth;
-    }
-
-    // Điều chỉnh crosshair
-    float dx = tracker.tarX - tracker.curX;
-    float dy = tracker.tarY - tracker.curY;
-    float d = sqrtf(dx*dx + dy*dy);
-    if (d > 0.5f) {
-        float maxStep = 1200.0f * density * dt * tracker.strength;
-        float step = fminf(d, maxStep);
-        float angle = atan2f(dy, dx);
-        tracker.curX += cosf(angle) * step;
-        tracker.curY += sinf(angle) * step;
-        // nhiễu nhẹ
-        tracker.curX += jitter(rng) * density * 0.3f;
-        tracker.curY += jitter(rng) * density * 0.3f;
-    }
-}
-
-// ==================== THREAD QUÉT ====================
-static void* scanThread(void*) {
-    while (running) {
-        scanEntities();
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
-    }
-    return nullptr;
-}
-
-static void* hookThread(void*) {
-    while (running) {
-        std::shared_lock lock(hookMutex);
-        for (auto& hk : hooks) {
-            if (!hk.active) {
-                // patch inline hook
-                uintptr_t page = hk.target & ~(getpagesize()-1);
-                mprotect((void*)page, getpagesize(), PROT_READ|PROT_WRITE|PROT_EXEC);
-                writeMem(hk.target, hk.patch.data(), hk.patch.size());
-                hk.active = true;
-            }
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    }
-    return nullptr;
-}
-
-// ==================== JNI INTERFACE ====================
-extern "C" {
-
-JNIEXPORT void JNICALL
-Java_com_ffopt_OptimizedService_nativeInit(JNIEnv* env, jobject thiz,
-                                            jobject surface, jobject inputQueue) {
-    ANativeWindow* win = ANativeWindow_fromSurface(env, surface);
-    W = ANativeWindow_getWidth(win);
-    H = ANativeWindow_getHeight(win);
-    density = W / 1080.0f;
-
-    gamePid = findPid();
-    libBase = getModuleBase(TARGET_LIB);
-    if (!libBase) LOGE("Không tìm thấy libil2cpp.so");
-
-    // Khởi tạo tracker
-    tracker.curX = W/2; tracker.curY = H/2;
-    tracker.tarX = W/2; tracker.tarY = H/2;
+void HeadHyperTrick::reset() {
+    tracker.curX = screenW / 2.0f;
+    tracker.curY = screenH / 2.0f;
+    tracker.tarX = tracker.curX;
+    tracker.tarY = tracker.curY;
+    tracker.filteredX = tracker.curX;
+    tracker.filteredY = tracker.curY;
+    tracker.strength = 0.0f;
     tracker.locked = false;
-
-    rng.seed(std::chrono::steady_clock::now().time_since_epoch().count());
-
-    // Khởi chạy thread
-    pthread_t t1, t2;
-    pthread_create(&t1, nullptr, scanThread, nullptr);
-    pthread_create(&t2, nullptr, hookThread, nullptr);
-
-    LOGI("Optimized FF Service initialized. W=%d H=%d density=%.2f", W, H, density);
+    tracker.inertiaX = 0.0f;
+    tracker.inertiaY = 0.0f;
+    tracker.lastCenterX = centerX;
+    tracker.lastCenterY = centerY;
+    lastDragging = false;
 }
 
-JNIEXPORT void JNICALL
-Java_com_ffopt_OptimizedService_nativeUpdateTargets(JNIEnv* env, jobject thiz,
-                                                     jfloatArray data) {
-    jfloat* arr = env->GetFloatArrayElements(data, nullptr);
-    jsize len = env->GetArrayLength(data);
-    // Dữ liệu đầu vào: [x,y,w,h,headX,headY,...] mỗi entity 22 float
-    std::vector<Entity> newEnts;
-    for (int i = 0; i+21 < len; i+=22) {
-        Entity e{};
-        e.x = arr[i]; e.y = arr[i+1]; e.width = arr[i+2]; e.height = arr[i+3];
-        e.headX = arr[i+4]; e.headY = arr[i+5];
-        e.neckX = arr[i+6]; e.neckY = arr[i+7];
-        e.bodyX = arr[i+8]; e.bodyY = arr[i+9];
-        e.distance = arr[i+10];
-        e.velX = arr[i+11]; e.velY = arr[i+12];
-        e.accX = arr[i+13]; e.accY = arr[i+14];
-        e.health = (int)arr[i+15]; e.maxHealth = 100;
-        e.team = (int)arr[i+16];
-        e.visible = arr[i+17] > 0.5f;
-        e.alive = e.health > 0;
-        e.moving = (fabsf(e.velX) > 0.5f || fabsf(e.velY) > 0.5f);
-        e.lastSeen = std::chrono::steady_clock::now();
-        if (e.alive) newEnts.push_back(e);
-    }
-    env->ReleaseFloatArrayElements(data, arr, JNI_ABORT);
-
-    if (!newEnts.empty()) {
-        std::unique_lock lock(entityMutex);
-        entities = std::move(newEnts);
+void HeadHyperTrick::setEntities(const Entity* entities, int count) {
+    this->entities.clear();
+    for (int i = 0; i < count; ++i) {
+        this->entities.push_back(entities[i]);
     }
 }
 
-JNIEXPORT void JNICALL
-Java_com_ffopt_OptimizedService_nativeUpdateAim(JNIEnv* env, jobject thiz,
-                                                 jfloat deltaTime) {
-    updateHeadLock(deltaTime);
+// -------------------- TÍNH ĐIỂM ƯU TIÊN (THEO BÁN KÍNH) --------------------
+float HeadHyperTrick::calculatePriority(const Entity& e, float cx, float cy) {
+    if (!e.alive || !e.visible) return -9999.0f;
+
+    float d = std::hypot(e.headX - cx, e.headY - cy);
+
+    // Loại bỏ nếu nằm ngoài bán kính tìm kiếm
+    if (d > config.searchRadius) return -9999.0f;
+
+    float score = 1000.0f;
+    score -= d * 0.8f;  // Càng gần tâm càng cao điểm
+
+    // Các yếu tố ưu tiên khác
+    if (e.health < 30) score += 400.0f;
+    if (e.crouching) score += 250.0f;
+    if (e.moving) score -= 200.0f;
+    if (e.team != 0) score += 150.0f;
+    if (e.distance < 300.0f) score += 200.0f;
+
+    return score;
 }
 
-JNIEXPORT jboolean JNICALL
-Java_com_ffopt_OptimizedService_nativeIsLocked(JNIEnv* env, jobject thiz) {
-    return tracker.locked ? JNI_TRUE : JNI_FALSE;
+Entity HeadHyperTrick::findBestTarget(float cx, float cy) {
+    Entity best;
+    best.alive = false;
+    float bestScore = -99999.0f;
+
+    for (const auto& e : entities) {
+        float score = calculatePriority(e, cx, cy);
+        if (score > bestScore) {
+            bestScore = score;
+            best = e;
+        }
+    }
+    return best;
 }
 
-JNIEXPORT jfloat JNICALL
-Java_com_ffopt_OptimizedService_nativeGetLockStrength(JNIEnv* env, jobject thiz) {
-    return tracker.strength;
+// -------------------- DỰ ĐOÁN VỊ TRÍ ĐẦU --------------------
+void HeadHyperTrick::predictHead(const Entity& e, float& outX, float& outY, float dt) {
+    if (!config.predictionEnabled) {
+        outX = e.headX;
+        outY = e.headY;
+        return;
+    }
+
+    float bulletTime = e.distance / config.bulletSpeed;
+    bulletTime = std::max(0.01f, bulletTime);
+
+    float leadX = e.velX * bulletTime * config.velocityComp;
+    float leadY = e.velY * bulletTime * config.velocityComp;
+    float gravityOffset = 0.5f * 980.0f * bulletTime * bulletTime * config.gravityComp;
+
+    outX = e.headX + leadX;
+    outY = e.headY + leadY + gravityOffset;
 }
 
-JNIEXPORT void JNICALL
-Java_com_ffopt_OptimizedService_nativeSetAimActive(JNIEnv* env, jobject thiz,
-                                                    jboolean active) {
-    aimActive = active;
-    if (!active) {
+// -------------------- BỘ LỌC --------------------
+void HeadHyperTrick::applyLowPass(float& value, float target, float alpha) {
+    value = value + (target - value) * alpha;
+}
+
+void HeadHyperTrick::applyInertia(float& value, float target, float inertiaFactor) {
+    float diff = target - value;
+    float maxInertia = std::abs(diff) * inertiaFactor;
+    float step = diff * 0.5f;
+    float inertiaStep = std::min(maxInertia, std::abs(step)) * (step >= 0 ? 1.0f : -1.0f);
+    value += inertiaStep;
+}
+
+// -------------------- VÒNG LẶP CHÍNH --------------------
+void HeadHyperTrick::update(float dt, float cx, float cy, bool isDragging) {
+    centerX = cx;
+    centerY = cy;
+
+    // Nếu không có entity, reset
+    if (entities.empty()) {
+        if (tracker.locked) {
+            tracker.locked = false;
+            tracker.strength = 0.0f;
+        }
+        return;
+    }
+
+    // Chọn mục tiêu
+    Entity target = findBestTarget(centerX, centerY);
+    if (!target.alive) {
+        if (tracker.locked) {
+            tracker.locked = false;
+            tracker.strength = 0.0f;
+        }
+        return;
+    }
+
+    // Dự đoán vị trí đầu
+    float predX, predY;
+    predictHead(target, predX, predY, dt);
+
+    // ---- Hỗ trợ kéo: tăng sensitivity khi đang kéo ----
+    float effectiveSensitivity = 1.0f;
+    if (isDragging) {
+        float dx = centerX - tracker.lastCenterX;
+        float dy = centerY - tracker.lastCenterY;
+        float speed = std::hypot(dx, dy);
+        float speedFactor = std::min(speed / 10.0f, 1.0f);
+        effectiveSensitivity = 1.0f + (config.dragSensitivity - 1.0f) * speedFactor;
+    }
+
+    // ---- Vùng hút (attraction) ----
+    float attractX = predX, attractY = predY;
+    float dToTarget = std::hypot(predX - centerX, predY - centerY);
+    if (dToTarget < config.attractionRadius) {
+        float attractFactor = config.attractionForce * (1.0f - dToTarget / config.attractionRadius);
+        attractFactor = std::clamp(attractFactor, 0.0f, 1.0f);
+        attractX = centerX + (predX - centerX) * attractFactor * effectiveSensitivity;
+        attractY = centerY + (predY - centerY) * attractFactor * effectiveSensitivity;
+    }
+
+    // ---- Lọc rung ----
+    applyLowPass(tracker.filteredX, attractX, config.lowPassAlpha);
+    applyLowPass(tracker.filteredY, attractY, config.lowPassAlpha);
+
+    // ---- Cập nhật mục tiêu ----
+    if (!tracker.locked) {
+        tracker.tarX = tracker.filteredX;
+        tracker.tarY = tracker.filteredY;
+        tracker.locked = true;
+        tracker.strength = config.lockStrength;
+    } else {
+        float smooth = config.smoothness;
+        tracker.tarX += (tracker.filteredX - tracker.tarX) * smooth;
+        tracker.tarY += (tracker.filteredY - tracker.tarY) * smooth;
+    }
+
+    // ---- Quán tính (nhẹ tâm) ----
+    applyInertia(tracker.inertiaX, tracker.tarX - tracker.curX, config.inertia);
+    applyInertia(tracker.inertiaY, tracker.tarY - tracker.curY, config.inertia);
+
+    // ---- Di chuyển crosshair ----
+    float dx = tracker.tarX - tracker.curX + tracker.inertiaX;
+    float dy = tracker.tarY - tracker.curY + tracker.inertiaY;
+    float d = std::hypot(dx, dy);
+
+    if (d > 0.5f) {
+        float maxStep = config.maxStep * dt * config.lockSpeed * tracker.strength;
+        maxStep = std::min(maxStep, d * 0.85f);
+        float step = std::min(d, maxStep);
+        float angle = std::atan2(dy, dx);
+
+        tracker.curX += std::cos(angle) * step;
+        tracker.curY += std::sin(angle) * step;
+
+        // Nhiễu nhẹ
+        float noise = noiseDist(rng) * config.noise * 0.3f;
+        tracker.curX += noise;
+        tracker.curY += noise;
+    }
+
+    // ---- Cập nhật lực bám dựa trên khoảng cách ----
+    float dToTargetReal = std::hypot(tracker.curX - tracker.tarX, tracker.curY - tracker.tarY);
+    if (dToTargetReal < config.snapDistance) {
+        tracker.strength = std::min(1.0f, tracker.strength + dt * 2.0f);
+    } else {
+        tracker.strength = std::max(0.2f, tracker.strength - dt * 0.5f);
+    }
+
+    // Nếu quá xa, giải phóng
+    if (dToTargetReal > config.snapDistance * 6.0f) {
         tracker.locked = false;
         tracker.strength = 0.0f;
     }
+
+    // Cập nhật locked
+    tracker.locked = (tracker.strength > 0.3f);
+
+    // Lưu trạng thái kéo cho frame sau
+    tracker.lastCenterX = centerX;
+    tracker.lastCenterY = centerY;
+    lastDragging = isDragging;
 }
 
-JNIEXPORT void JNICALL
-Java_com_ffopt_OptimizedService_nativeSetFireActive(JNIEnv* env, jobject thiz,
-                                                     jboolean active) {
-    fireActive = active;
+// -------------------- GETTERS / SETTERS --------------------
+void HeadHyperTrick::getCrosshair(float& x, float& y) const {
+    x = tracker.curX;
+    y = tracker.curY;
 }
 
-JNIEXPORT void JNICALL
-Java_com_ffopt_OptimizedService_nativeDestroy(JNIEnv* env, jobject thiz) {
-    running = false;
-    closeMem();
-    LOGI("Optimized FF Service destroyed.");
+bool HeadHyperTrick::isLocked() const {
+    return tracker.locked;
 }
 
-} // extern "C"
+float HeadHyperTrick::getLockStrength() const {
+    return tracker.strength;
+}
+
+void HeadHyperTrick::setConfig(const HyperConfig& cfg) {
+    config = cfg;
+}
