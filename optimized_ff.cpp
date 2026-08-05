@@ -6,7 +6,7 @@
 #include <fstream>
 #include <string>
 
-// Raw configuration data payload to be exported
+
 const std::string configData = R"raw_config(Aimlock Extreme Performance Config
 
 <?xml version="1.0" encoding="UTF-8"?>
